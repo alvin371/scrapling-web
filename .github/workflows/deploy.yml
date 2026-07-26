@@ -1,4 +1,4 @@
-name: Build and Deploy
+name: Deploy
 
 on:
   push:
@@ -9,12 +9,15 @@ concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  SERVER_USER: forbes
+  REMOTE_REPO_DIR: /home/forbes/serve/scrapling-web/repo
+  REMOTE_ENV_FILE: /home/forbes/artifact/scrapling-web/.env
+
 jobs:
-  build:
-    name: Build & push images
+  deploy:
+    name: Build on server & deploy
     runs-on: ubuntu-latest
-    outputs:
-      image_tag: ${{ steps.meta.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -22,77 +25,52 @@ jobs:
         id: meta
         run: echo "tag=${GITHUB_REF_NAME}-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Build & push API image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile.api
-          push: true
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/scrapling-web-api:${{ steps.meta.outputs.tag }}
-            ${{ secrets.DOCKER_USERNAME }}/scrapling-web-api:${{ github.ref_name }}
-          cache-from: type=gha,scope=api
-          cache-to: type=gha,scope=api,mode=max
-
-      - name: Build & push Worker image
-        uses: docker/build-push-action@v6
-        with:
-          context: ./worker
-          file: ./worker/Dockerfile
-          push: true
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/scrapling-web-worker:${{ steps.meta.outputs.tag }}
-            ${{ secrets.DOCKER_USERNAME }}/scrapling-web-worker:${{ github.ref_name }}
-          cache-from: type=gha,scope=worker
-          cache-to: type=gha,scope=worker,mode=max
-
-  deploy:
-    name: Deploy to server
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Ansible
-        run: pipx install --include-deps ansible-core
-
-      - name: Write SSH private key
+      - name: Set up SSH
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.ANSIBLE_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
-      - name: Generate inventory
-        working-directory: deploy/ansible
+      - name: Render server .env from secrets
         run: |
-          cat > inventory.ini <<EOF
-          [scrapling]
-          ${{ secrets.SERVER_HOST }} ansible_user=forbes ansible_ssh_private_key_file=~/.ssh/deploy_key
+          umask 077
+          cat > ci.env <<EOF
+          POSTGRES_USER=${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_DB=${{ secrets.POSTGRES_DB }}
+          DB_HOST=postgres
+          DB_PORT=5432
+          REDIS_HOST=redis
+          REDIS_PORT=6379
+          REDIS_DB=0
+          APP_ENV=production
+          SECRET_KEY=${{ secrets.SECRET_KEY }}
+          LOG_LEVEL=INFO
+          CORS_ORIGINS=${{ secrets.CORS_ORIGINS }}
+          SCRAPLING_PROXY=${{ secrets.SCRAPLING_PROXY }}
+          RQ_QUEUES=high,default,low
+          API_KEYS=${{ secrets.API_KEYS }}
+          INSTAGRAM_SESSION_ID=${{ secrets.INSTAGRAM_SESSION_ID }}
+          THREADS_SESSION_ID=${{ secrets.THREADS_SESSION_ID }}
           EOF
 
-      - name: Run deploy playbook
-        working-directory: deploy/ansible
-        env:
-          ANSIBLE_HOST_KEY_CHECKING: "False"
+      - name: Sync repo to server
         run: |
-          ansible-playbook deploy.yml \
-            -e registry_user='${{ secrets.DOCKER_USERNAME }}' \
-            -e docker_password='${{ secrets.DOCKER_PASSWORD }}' \
-            -e image_tag='${{ needs.build.outputs.image_tag }}' \
-            -e postgres_user='${{ secrets.POSTGRES_USER }}' \
-            -e postgres_password='${{ secrets.POSTGRES_PASSWORD }}' \
-            -e postgres_db='${{ secrets.POSTGRES_DB }}' \
-            -e secret_key='${{ secrets.SECRET_KEY }}' \
-            -e api_keys='${{ secrets.API_KEYS }}' \
-            -e cors_origins='${{ secrets.CORS_ORIGINS }}' \
-            -e scrapling_proxy='${{ secrets.SCRAPLING_PROXY }}' \
-            -e instagram_session_id='${{ secrets.INSTAGRAM_SESSION_ID }}' \
-            -e threads_session_id='${{ secrets.THREADS_SESSION_ID }}'
+          SSH="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new"
+          $SSH "${SERVER_USER}@${{ secrets.SERVER_HOST }}" "mkdir -p ${REMOTE_REPO_DIR} $(dirname ${REMOTE_ENV_FILE})"
+          rsync -az --delete -e "$SSH" \
+            --exclude '.git' --exclude 'logs' --exclude '.venv' \
+            --exclude 'postgres-data' --exclude 'redis-data' \
+            ./ "${SERVER_USER}@${{ secrets.SERVER_HOST }}:${REMOTE_REPO_DIR}/"
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new \
+            ci.env "${SERVER_USER}@${{ secrets.SERVER_HOST }}:${REMOTE_ENV_FILE}"
+
+      - name: Build & deploy on server
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new \
+            "${SERVER_USER}@${{ secrets.SERVER_HOST }}" \
+            "bash ${REMOTE_REPO_DIR}/deploy/deploy.sh '${{ steps.meta.outputs.tag }}'"
+
+      - name: Clean up
+        if: always()
+        run: rm -f ci.env ~/.ssh/deploy_key
