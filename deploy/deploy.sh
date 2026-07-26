@@ -72,6 +72,21 @@ if [[ -z "$cid" ]]; then
   exit 1
 fi
 
+# --- wait for Postgres to accept connections ---------------------------------
+# The api health endpoint returns ok even when the DB is unreachable, so we must
+# wait on Postgres itself before running migrations.
+echo "==> waiting for postgres to accept connections"
+pgcid=""
+for _ in $(seq 1 30); do
+  pgcid="$(docker ps -q -f "name=${STACK}_postgres" | head -n1 || true)"
+  if [[ -n "$pgcid" ]] && \
+     docker exec "$pgcid" pg_isready -U "${POSTGRES_USER:-scraper}" -d "${POSTGRES_DB:-social_scraper}" >/dev/null 2>&1; then
+    echo "postgres ready"
+    break
+  fi
+  sleep 3
+done
+
 # --- database bootstrap / migrate --------------------------------------------
 # Fresh DB: init.sql already built the schema at HEAD -> stamp head.
 # Existing DB: apply any newer migrations -> upgrade head.
