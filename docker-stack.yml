@@ -5,8 +5,12 @@
 #   - app secrets via a bind-mounted .env (Swarm ignores `env_file:`)
 #   - API published on 18000 for the existing nginx vhost scrap.acnenosystem.com
 #
-# Required env vars at deploy time (Ansible sets these):
-#   REGISTRY, IMAGE_TAG, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
+# Images are built ON the server (no registry). Deploy with:
+#   docker stack deploy --resolve-image never -c docker-stack.yml scrapling-web
+# so Swarm uses the locally-built images by tag instead of pulling.
+#
+# Required env vars at deploy time (deploy/deploy.sh sets these, sourcing .env):
+#   IMAGE_TAG, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
 # Optional (have defaults): DATA_DIR, ENV_FILE
 version: "3.9"
 
@@ -57,7 +61,7 @@ services:
           memory: 256M
 
   api:
-    image: ${REGISTRY}/scrapling-web-api:${IMAGE_TAG}
+    image: scrapling-web-api:${IMAGE_TAG:-current}
     environment:
       APP_ENV: production
       DB_HOST: postgres
@@ -86,7 +90,7 @@ services:
           memory: 512M
 
   worker:
-    image: ${REGISTRY}/scrapling-web-worker:${IMAGE_TAG}
+    image: scrapling-web-worker:${IMAGE_TAG:-current}
     environment:
       APP_ENV: production
       DB_HOST: postgres
