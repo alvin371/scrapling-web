@@ -10,9 +10,18 @@ class Settings(BaseSettings):
     log_path: str = "logs/app.log"
     api_keys: str = ""  # comma-separated, e.g. "key1,key2"
 
+    # CORS allowed origins: comma-separated list, or "*" for any (dev default).
+    # In production set e.g. CORS_ORIGINS=https://scrap.acnenosystem.com
+    cors_origins: str = "*"
+
     @property
     def api_keys_set(self) -> set[str]:
         return {k.strip() for k in self.api_keys.split(",") if k.strip()}
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        origins = [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+        return origins or ["*"]
 
     db_host: str = "localhost"
     db_port: int = 5432
