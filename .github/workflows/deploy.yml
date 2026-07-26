@@ -1,0 +1,76 @@
+name: Deploy
+
+on:
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SERVER_USER: forbes
+  REMOTE_REPO_DIR: /home/forbes/serve/scrapling-web/repo
+  REMOTE_ENV_FILE: /home/forbes/artifact/scrapling-web/.env
+
+jobs:
+  deploy:
+    name: Build on server & deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: meta
+        run: echo "tag=${GITHUB_REF_NAME}-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      - name: Render server .env from secrets
+        run: |
+          umask 077
+          cat > ci.env <<EOF
+          POSTGRES_USER=${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_DB=${{ secrets.POSTGRES_DB }}
+          DB_HOST=postgres
+          DB_PORT=5432
+          REDIS_HOST=redis
+          REDIS_PORT=6379
+          REDIS_DB=0
+          APP_ENV=production
+          SECRET_KEY=${{ secrets.SECRET_KEY }}
+          LOG_LEVEL=INFO
+          CORS_ORIGINS=${{ secrets.CORS_ORIGINS }}
+          SCRAPLING_PROXY=${{ secrets.SCRAPLING_PROXY }}
+          RQ_QUEUES=high,default,low
+          API_KEYS=${{ secrets.API_KEYS }}
+          INSTAGRAM_SESSION_ID=${{ secrets.INSTAGRAM_SESSION_ID }}
+          THREADS_SESSION_ID=${{ secrets.THREADS_SESSION_ID }}
+          EOF
+
+      - name: Sync repo to server
+        run: |
+          SSH="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new"
+          $SSH "${SERVER_USER}@${{ secrets.SERVER_HOST }}" "mkdir -p ${REMOTE_REPO_DIR} $(dirname ${REMOTE_ENV_FILE})"
+          rsync -az --delete -e "$SSH" \
+            --exclude '.git' --exclude 'logs' --exclude '.venv' \
+            --exclude 'postgres-data' --exclude 'redis-data' \
+            ./ "${SERVER_USER}@${{ secrets.SERVER_HOST }}:${REMOTE_REPO_DIR}/"
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new \
+            ci.env "${SERVER_USER}@${{ secrets.SERVER_HOST }}:${REMOTE_ENV_FILE}"
+
+      - name: Build & deploy on server
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new \
+            "${SERVER_USER}@${{ secrets.SERVER_HOST }}" \
+            "bash ${REMOTE_REPO_DIR}/deploy/deploy.sh '${{ steps.meta.outputs.tag }}'"
+
+      - name: Clean up
+        if: always()
+        run: rm -f ci.env ~/.ssh/deploy_key

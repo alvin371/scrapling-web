@@ -41,8 +41,6 @@ logs/*.json
 *.swo
 .DS_Store
 
-# Docker
-.dockerignore
 
 # Alembic
 alembic/versions/*.pyc

@@ -1,0 +1,130 @@
+# Docker Swarm stack for scrapling-web (deployed via `docker stack deploy`).
+# Matches the server's existing convention (forbes / sec-forbes / mysql-8 stacks):
+#   - dedicated Postgres for THIS app (server has only MySQL, which other apps use)
+#   - host bind-mounts under ${DATA_DIR} for DB/Redis persistence
+#   - app secrets via a bind-mounted .env (Swarm ignores `env_file:`)
+#   - API published on 18000 for the existing nginx vhost scrap.acnenosystem.com
+#
+# Images are built ON the server (no registry). Deploy with:
+#   docker stack deploy --resolve-image never -c docker-stack.yml scrapling-web
+# so Swarm uses the locally-built images by tag instead of pulling.
+#
+# Required env vars at deploy time (deploy/deploy.sh sets these, sourcing .env):
+#   IMAGE_TAG, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
+# Optional (have defaults): DATA_DIR, ENV_FILE
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - ${DATA_DIR:-/home/forbes/serve/scrapling-web}/postgres-data:/var/lib/postgresql/data
+      # init.sql builds the full schema on first boot (idempotent bootstrap; see Ansible).
+      - ${DATA_DIR:-/home/forbes/serve/scrapling-web}/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: any
+      resources:
+        limits:
+          memory: 512M
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - ${DATA_DIR:-/home/forbes/serve/scrapling-web}/redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: any
+      resources:
+        limits:
+          memory: 256M
+
+  api:
+    image: scrapling-web-api:${IMAGE_TAG:-current}
+    environment:
+      APP_ENV: production
+      DB_HOST: postgres
+      DB_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    volumes:
+      - ${ENV_FILE:-/home/forbes/artifact/scrapling-web/.env}:/project/.env:ro
+      - ${DATA_DIR:-/home/forbes/serve/scrapling-web}/logs:/project/logs
+    ports:
+      - "18000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: any
+      resources:
+        limits:
+          memory: 512M
+
+  worker:
+    image: scrapling-web-worker:${IMAGE_TAG:-current}
+    environment:
+      APP_ENV: production
+      DB_HOST: postgres
+      DB_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    volumes:
+      - ${ENV_FILE:-/home/forbes/artifact/scrapling-web/.env}:/worker/.env:ro
+      - ${DATA_DIR:-/home/forbes/serve/scrapling-web}/logs:/worker/logs
+    deploy:
+      # Single replica: headless Chromium is memory-hungry and the box has no swap.
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: any
+      resources:
+        limits:
+          memory: 1536M
+
+  rq-dashboard:
+    image: eoranged/rq-dashboard
+    environment:
+      RQ_DASHBOARD_REDIS_URL: redis://redis:6379
+    # NOTE: unauthenticated UI. Published only so nginx can front it if desired;
+    # consider adding basic-auth at the nginx layer before exposing publicly.
+    ports:
+      - "19181:9181"
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: any
+      resources:
+        limits:
+          memory: 128M

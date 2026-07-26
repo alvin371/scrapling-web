@@ -23,7 +23,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Social Scraper Service", version="1.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins_list,
     allow_methods=["*"],
     allow_headers=["*"],
 )

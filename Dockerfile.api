@@ -1,0 +1,30 @@
+# Production image for the FastAPI API service.
+# Built from the REPO ROOT (not ./app) so the image is fully self-contained:
+# it carries the `app` package plus `alembic/` + `alembic.ini` for migrations,
+# with no reliance on the dev-only `.:/project` bind mount.
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/project
+
+WORKDIR /project
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev gcc && rm -rf /var/lib/apt/lists/*
+
+COPY app/requirements.txt ./app/requirements.txt
+RUN pip install --no-cache-dir -r app/requirements.txt
+
+# Application package + migration tooling (env.py inserts the repo root on sys.path
+# and imports `app.core.database` / `app.config`, so both must live under /project).
+COPY app/ ./app/
+COPY alembic/ ./alembic/
+COPY alembic.ini ./alembic.ini
+
+RUN mkdir -p /project/logs
+
+EXPOSE 8000
+
+# No --reload in production. Workers tuned low for the 3-vCPU box.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
