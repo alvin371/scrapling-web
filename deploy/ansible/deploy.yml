@@ -1,0 +1,121 @@
+---
+# Deploys the scrapling-web Docker Swarm stack to the target server.
+# Invoked by GitHub Actions after images are built and pushed.
+#
+# Required extra-vars (passed by CI):
+#   registry_user, image_tag, docker_password,
+#   postgres_user, postgres_password, postgres_db,
+#   secret_key, api_keys
+# Optional extra-vars: cors_origins, scrapling_proxy,
+#   instagram_session_id, threads_session_id, data_dir, env_file, stack_name
+- name: Deploy scrapling-web stack
+  hosts: scrapling
+  gather_facts: false
+  vars:
+    stack_name: scrapling-web
+    data_dir: /home/forbes/serve/scrapling-web
+    artifact_dir: /home/forbes/artifact/scrapling-web
+    env_file: "{{ artifact_dir }}/.env"
+    cors_origins: "*"
+    # repo root, relative to this playbook (deploy/ansible/deploy.yml)
+    repo_root: "{{ playbook_dir }}/../.."
+
+  tasks:
+    - name: Ensure data + artifact directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ data_dir }}"
+        - "{{ data_dir }}/postgres-data"
+        - "{{ data_dir }}/redis-data"
+        - "{{ data_dir }}/logs"
+        - "{{ artifact_dir }}"
+
+    - name: Copy database init.sql (full schema, used on first Postgres boot)
+      ansible.builtin.copy:
+        src: "{{ repo_root }}/db/init.sql"
+        dest: "{{ data_dir }}/init.sql"
+        mode: "0644"
+
+    - name: Copy stack file
+      ansible.builtin.copy:
+        src: "{{ repo_root }}/docker-stack.yml"
+        dest: "{{ data_dir }}/docker-stack.yml"
+        mode: "0644"
+
+    - name: Render app .env from secrets
+      ansible.builtin.template:
+        src: templates/env.j2
+        dest: "{{ env_file }}"
+        mode: "0600"
+
+    - name: Log in to Docker registry (for --with-registry-auth)
+      ansible.builtin.command:
+        cmd: docker login -u "{{ registry_user }}" --password-stdin
+        stdin: "{{ docker_password }}"
+      no_log: true
+
+    - name: Deploy the stack
+      ansible.builtin.command:
+        cmd: >-
+          docker stack deploy
+          --with-registry-auth
+          --resolve-image always
+          -c {{ data_dir }}/docker-stack.yml
+          {{ stack_name }}
+      environment:
+        REGISTRY: "{{ registry_user }}"
+        IMAGE_TAG: "{{ image_tag }}"
+        POSTGRES_USER: "{{ postgres_user }}"
+        POSTGRES_PASSWORD: "{{ postgres_password }}"
+        POSTGRES_DB: "{{ postgres_db }}"
+        DATA_DIR: "{{ data_dir }}"
+        ENV_FILE: "{{ env_file }}"
+      no_log: true
+
+    - name: Wait for the API container to report healthy
+      ansible.builtin.shell: >-
+        docker ps -q -f name={{ stack_name }}_api -f health=healthy | head -n1
+      register: api_cid
+      changed_when: false
+      until: api_cid.stdout != ""
+      retries: 40
+      delay: 6
+
+    - name: Bootstrap (first deploy) or migrate the database
+      # On a fresh DB, init.sql already created the full schema (which is at HEAD),
+      # so we STAMP head rather than re-running migrations that would duplicate enum
+      # values. On an already-initialized DB, we UPGRADE to apply any new migrations.
+      ansible.builtin.shell: |
+        docker exec {{ api_cid.stdout }} sh -c '
+          cd /project
+          cur=$(alembic current 2>/dev/null | tr -d "[:space:]")
+          if [ -z "$cur" ]; then
+            echo "fresh DB -> alembic stamp head"
+            alembic stamp head
+          else
+            echo "existing DB -> alembic upgrade head"
+            alembic upgrade head
+          fi
+        '
+      register: migrate_out
+      changed_when: true
+
+    - name: Show migration result
+      ansible.builtin.debug:
+        var: migrate_out.stdout_lines
+
+    - name: Health check the API endpoint
+      ansible.builtin.uri:
+        url: http://127.0.0.1:18000/api/v1/health
+        return_content: true
+      register: health
+      until: health.status == 200
+      retries: 20
+      delay: 5
+
+    - name: Report health
+      ansible.builtin.debug:
+        var: health.json

@@ -1,0 +1,98 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build & push images
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: meta
+        run: echo "tag=${GITHUB_REF_NAME}-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build & push API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.api
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/scrapling-web-api:${{ steps.meta.outputs.tag }}
+            ${{ secrets.DOCKER_USERNAME }}/scrapling-web-api:${{ github.ref_name }}
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,scope=api,mode=max
+
+      - name: Build & push Worker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./worker
+          file: ./worker/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/scrapling-web-worker:${{ steps.meta.outputs.tag }}
+            ${{ secrets.DOCKER_USERNAME }}/scrapling-web-worker:${{ github.ref_name }}
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,scope=worker,mode=max
+
+  deploy:
+    name: Deploy to server
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ansible
+        run: pipx install --include-deps ansible-core
+
+      - name: Write SSH private key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ANSIBLE_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      - name: Generate inventory
+        working-directory: deploy/ansible
+        run: |
+          cat > inventory.ini <<EOF
+          [scrapling]
+          ${{ secrets.SERVER_HOST }} ansible_user=forbes ansible_ssh_private_key_file=~/.ssh/deploy_key
+          EOF
+
+      - name: Run deploy playbook
+        working-directory: deploy/ansible
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+        run: |
+          ansible-playbook deploy.yml \
+            -e registry_user='${{ secrets.DOCKER_USERNAME }}' \
+            -e docker_password='${{ secrets.DOCKER_PASSWORD }}' \
+            -e image_tag='${{ needs.build.outputs.image_tag }}' \
+            -e postgres_user='${{ secrets.POSTGRES_USER }}' \
+            -e postgres_password='${{ secrets.POSTGRES_PASSWORD }}' \
+            -e postgres_db='${{ secrets.POSTGRES_DB }}' \
+            -e secret_key='${{ secrets.SECRET_KEY }}' \
+            -e api_keys='${{ secrets.API_KEYS }}' \
+            -e cors_origins='${{ secrets.CORS_ORIGINS }}' \
+            -e scrapling_proxy='${{ secrets.SCRAPLING_PROXY }}' \
+            -e instagram_session_id='${{ secrets.INSTAGRAM_SESSION_ID }}' \
+            -e threads_session_id='${{ secrets.THREADS_SESSION_ID }}'
