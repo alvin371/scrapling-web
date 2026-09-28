@@ -390,41 +390,38 @@ def scrape_threads_post(username: str, post_code: str) -> dict:
 
     for script in page.css('script[type="application/json"]'):
         raw = script.text or ""
-        if "thread_items" not in raw:
+        if post_code not in raw or "like_count" not in raw:
             continue
         try:
             data = json.loads(raw)
-            # Post page: data.data.edges  (confirmed via live inspection)
-            edges = _parse_bbox(data, "data", "edges")
-            thread_items = _extract_thread_items_from_edges(edges)
-            if not thread_items:
-                # Profile-style fallback: mediaData.edges
-                edges = _parse_bbox(data, "mediaData", "edges")
+            post = _parse_bbox(data, "media")
+            if not isinstance(post, dict) or post.get("code") != post_code:
+                # Older Threads page layouts nest posts under edge thread_items.
+                edges = _parse_bbox(data, "data", "edges") or _parse_bbox(data, "mediaData", "edges")
                 thread_items = _extract_thread_items_from_edges(edges)
-            if thread_items:
-                post = thread_items[0].get("post", {})
-                if post:
-                    logger.info(f"[threads] Post scraped: {post_code} likes={post.get('like_count')}")
-                    result = _map_threads_post(post, username)
+                post = thread_items[0].get("post", {}) if thread_items else {}
+            if post and post.get("code") == post_code:
+                logger.info(f"[threads] Post scraped: {post_code} likes={post.get('like_count')}")
+                result = _map_threads_post(post, username)
 
-                    # Approximate view count is embedded in the SSR HTML (e.g. "7.6K views")
-                    approx_views = _extract_views_from_html(page.html_content or "")
-                    if approx_views:
-                        result["views"] = approx_views
+                # Approximate view count is embedded in the SSR HTML (e.g. "7.6K views")
+                approx_views = _extract_views_from_html(page.html_content or "")
+                if approx_views:
+                    result["views"] = approx_views
 
-                    from config import settings
-                    if settings.threads_session_id:
-                        # Playwright path: may return exact count (post owner) or
-                        # the same approximate count — use whichever is higher.
-                        exact_views = _get_threads_post_views(
-                            result.get("url") or url,
-                            settings.threads_session_id,
-                        )
-                        if exact_views:
-                            result["views"] = exact_views
+                from config import settings
+                if settings.threads_session_id:
+                    # Playwright path: may return exact count (post owner) or
+                    # the same approximate count — use whichever is higher.
+                    exact_views = _get_threads_post_views(
+                        result.get("url") or url,
+                        settings.threads_session_id,
+                    )
+                    if exact_views:
+                        result["views"] = exact_views
 
-                    return result
+                return result
         except (json.JSONDecodeError, TypeError, IndexError, KeyError):
             continue
 
-    return {"username": username, "post_code": post_code, "url": url, "error": "Could not parse post data"}
+    raise ValueError(f"Could not parse Threads post data: {url}")
