@@ -80,7 +80,7 @@ services:
       - ${DATA_DIR:-/home/forbes/serve/scrapling-web}/logs:/project/logs
     logging: *default-logging
     ports:
-      - "18000:8000"
+      - "${API_PORT:-18000}:8000"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')\" || exit 1"]
       interval: 15s
@@ -143,7 +143,7 @@ services:
     # NOTE: unauthenticated UI. Published only so nginx can front it if desired;
     # consider adding basic-auth at the nginx layer before exposing publicly.
     ports:
-      - "19181:9181"
+      - "${RQ_DASHBOARD_PORT:-19181}:9181"
     deploy:
       replicas: 1
       placement:
