@@ -1,7 +1,10 @@
 import redis.asyncio as aioredis
 from app.config import settings
 
-redis_pool = aioredis.ConnectionPool.from_url(settings.redis_url, max_connections=20)
+# Blocking pool: when all 20 connections are busy a request waits (up to 5 s) for one
+# instead of failing with MaxConnectionsError -> HTTP 500 (seen with 50 concurrent
+# POSTs, 2026-11-10).
+redis_pool = aioredis.BlockingConnectionPool.from_url(settings.redis_url, max_connections=20, timeout=5)
 
 
 async def get_redis() -> aioredis.Redis:

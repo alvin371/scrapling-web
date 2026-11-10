@@ -46,5 +46,25 @@ class Settings(BaseSettings):
 
     scrapling_proxy: str = ""
 
+    # --- RQ job lifetimes (seconds) --------------------------------------------
+    rq_job_timeout: int = 300
+    # How long a finished job's result stays in Redis for GET /jobs/{id} to pick up
+    # (RQ default 500 s is shorter than the clients' poll + backlog window).
+    rq_result_ttl: int = 3600
+    # How long failed jobs stay in Redis. RQ's default is 1 year, which had piled up
+    # ~26k failed jobs (~2/3 of Redis memory) by 2026-11-10.
+    rq_failure_ttl: int = 3 * 86400
+
+    # --- Feature flags -----------------------------------------------------------
+    # Fail submissions for targets the worker marked dead (worker/dead_targets.py)
+    # instantly, without enqueueing. Set false to ignore dead marks immediately.
+    skip_dead_targets: bool = True
+    # Reuse the job already queued/running for the same platform+type+target+queue
+    # instead of enqueueing a duplicate (clients resubmit when their poll times out).
+    dedup_inflight_jobs: bool = True
+    inflight_ttl_seconds: int = 3600   # upper bound on how long a job is considered in flight
+    dedup_claim_ttl_seconds: int = 15     # a claim auto-expires if its request dies mid-enqueue
+    dedup_claim_wait_seconds: float = 10.0  # waiters give up on a slow claim and fail open
+
 
 settings = Settings()

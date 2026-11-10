@@ -12,8 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /worker
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# constraints.txt = exact versions of the image running in production (pip freeze,
+# 2026-11-10); requirements.txt stays loose so upgrades are a deliberate edit here.
+COPY requirements.txt constraints.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
 
 # Install Chromium (via Playwright) + Camoufox + BrowserForge fingerprint databases
 RUN scrapling install

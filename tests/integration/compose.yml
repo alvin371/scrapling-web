@@ -1,0 +1,38 @@
+# Isolated integration stack: own network, own Redis/Postgres, no host ports.
+name: scrapling-it
+x-env: &env
+  APP_ENV: production
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  POSTGRES_USER: it
+  POSTGRES_PASSWORD: it
+  POSTGRES_DB: it
+  API_KEYS: itkey
+  THREADS_SESSION_ID: dummy-session   # proves the browser stays off even with a session
+services:
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+  postgres:
+    image: postgres:15-alpine
+    command: ["postgres", "-c", "listen_addresses=*"]
+    environment: { POSTGRES_USER: it, POSTGRES_PASSWORD: it, POSTGRES_DB: it }
+    volumes: ["../../db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro"]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U it -d it"], interval: 2s, retries: 30 }
+  api:
+    image: scrapling-web-api:test-fix
+    environment: *env
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started } }
+  worker:
+    image: scrapling-web-worker:test-fix
+    environment: *env
+    stop_grace_period: 330s
+    mem_limit: 1024m
+    volumes:
+      - ./probe_tasks.py:/worker/tasks/probe_tasks.py:ro
+      - itlogs:/worker/logs
+    depends_on: [redis]
+volumes:
+  itlogs: {}

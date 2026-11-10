@@ -10,7 +10,17 @@ import re
 from datetime import datetime, timezone
 from scrapling.fetchers import FetcherSession
 from loguru import logger
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+
+import dead_targets
+
+
+class ThreadsPostUnavailable(ValueError):
+    """Threads redirected to ?error=invalid_post: the post is deleted, private or invalid.
+    Permanent — a browser sees the same redirect (verified 2026-11-10)."""
+
+
+class ThreadsPostParseError(ValueError):
+    """The post page loaded but carried no parsable post data."""
 
 
 def _parse_bbox(data: dict, *path: str):
@@ -284,6 +294,7 @@ def _get_threads_post_views(post_url: str, session_id: str) -> int:
     Returns 0 on complete failure.
     """
     import urllib.parse
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
     session_id = urllib.parse.unquote(session_id)
     views = 0
 
@@ -385,8 +396,14 @@ def scrape_threads_post(username: str, post_code: str) -> dict:
     logger.info(f"[threads] Scraping single post: @{username}/post/{post_code}")
     # threads.com and threads.net both work; prefer .net for consistency
     url = f"https://www.threads.net/@{username}/post/{post_code}"
+    target = f"{username}/{post_code}"
     with FetcherSession(impersonate="chrome", stealthy_headers=True) as s:
         page = s.get(url)
+
+    if "error=invalid_post" in str(getattr(page, "url", "") or ""):
+        reason = f"Threads post unavailable (deleted/private/invalid): {url}"
+        dead_targets.record_permanent_failure("threads", "post", target, "unavailable", reason)
+        raise ThreadsPostUnavailable(reason)
 
     for script in page.css('script[type="application/json"]'):
         raw = script.text or ""
@@ -410,7 +427,7 @@ def scrape_threads_post(username: str, post_code: str) -> dict:
                     result["views"] = approx_views
 
                 from config import settings
-                if settings.threads_session_id:
+                if settings.threads_browser_views and settings.threads_session_id:
                     # Playwright path: may return exact count (post owner) or
                     # the same approximate count — use whichever is higher.
                     exact_views = _get_threads_post_views(
@@ -420,8 +437,11 @@ def scrape_threads_post(username: str, post_code: str) -> dict:
                     if exact_views:
                         result["views"] = exact_views
 
+                dead_targets.clear("threads", "post", target)
                 return result
         except (json.JSONDecodeError, TypeError, IndexError, KeyError):
             continue
 
-    raise ValueError(f"Could not parse Threads post data: {url}")
+    reason = f"Could not parse Threads post data: {url}"
+    dead_targets.record_permanent_failure("threads", "post", target, "parse", reason)
+    raise ThreadsPostParseError(reason)

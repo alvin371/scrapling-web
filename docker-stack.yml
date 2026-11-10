@@ -14,6 +14,13 @@
 # Optional (have defaults): DATA_DIR, ENV_FILE
 version: "3.9"
 
+# Cap container stdout logs (the json-file driver keeps everything by default).
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   postgres:
     image: postgres:15-alpine
@@ -71,6 +78,7 @@ services:
     volumes:
       - ${ENV_FILE:-/home/forbes/artifact/scrapling-web/.env}:/project/.env:ro
       - ${DATA_DIR:-/home/forbes/serve/scrapling-web}/logs:/project/logs
+    logging: *default-logging
     ports:
       - "18000:8000"
     healthcheck:
@@ -100,16 +108,33 @@ services:
     volumes:
       - ${ENV_FILE:-/home/forbes/artifact/scrapling-web/.env}:/worker/.env:ro
       - ${DATA_DIR:-/home/forbes/serve/scrapling-web}/logs:/worker/logs
+    # RQ does a warm shutdown on SIGTERM (finishes the running job, then exits);
+    # give it longer than the slowest job so updates never abandon a job mid-way.
+    stop_grace_period: 330s
+    logging: *default-logging
     deploy:
-      # Single replica: headless Chromium is memory-hungry and the box has no swap.
-      replicas: 1
+      # Two replicas. Safe because RQ hands each job to exactly one worker (atomic
+      # queue pop + per-worker started registry) and the worker never writes to the
+      # DB — results flow back only through the API. Headless Chromium is no longer
+      # launched per post (THREADS_BROWSER_VIEWS=false), so each replica idles at
+      # ~100 MB; 1 GiB each leaves room if the flag is turned back on.
+      replicas: 2
       placement:
         constraints: [node.role == manager]
       restart_policy:
         condition: any
+      update_config:
+        parallelism: 1          # one replica at a time keeps the queue draining
+        order: stop-first
+        delay: 10s
+        failure_action: rollback
+        monitor: 30s
+      rollback_config:
+        parallelism: 1
+        order: stop-first
       resources:
         limits:
-          memory: 1536M
+          memory: 1024M
 
   rq-dashboard:
     image: eoranged/rq-dashboard
