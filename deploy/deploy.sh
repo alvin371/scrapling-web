@@ -62,7 +62,9 @@ docker stack deploy --resolve-image never -c "$REPO_DIR/docker-stack.yml" "$STAC
 echo "==> waiting for api to report healthy"
 cid=""
 for _ in $(seq 1 50); do
-  cid="$(docker ps -q -f "name=${STACK}_api" -f health=healthy | head -n1 || true)"
+  # Only the NEW task's container: during a rolling update the old one can still be
+  # "healthy" while it is being detached from the stack network.
+  cid="$(docker ps -q -f "name=${STACK}_api" -f health=healthy -f "ancestor=scrapling-web-api:$TAG" | head -n1 || true)"
   [[ -n "$cid" ]] && break
   sleep 6
 done
@@ -74,18 +76,30 @@ fi
 
 # --- wait for Postgres to accept connections ---------------------------------
 # The api health endpoint returns ok even when the DB is unreachable, so we must
-# wait on Postgres itself before running migrations.
-echo "==> waiting for postgres to accept connections"
-pgcid=""
-for _ in $(seq 1 30); do
-  pgcid="$(docker ps -q -f "name=${STACK}_postgres" | head -n1 || true)"
-  if [[ -n "$pgcid" ]] && \
-     docker exec "$pgcid" pg_isready -U "${POSTGRES_USER:-scraper}" -d "${POSTGRES_DB:-social_scraper}" >/dev/null 2>&1; then
-    echo "postgres ready"
-    break
+# wait on Postgres itself before running migrations. Check FROM the api container:
+# when the stack update recreates Postgres, its service name does not resolve on
+# the overlay network until the new task is up (2026-11-10 deploy failed here with
+# "Name or service not known").
+echo "==> waiting for postgres to be reachable from the api container"
+db_ok=""
+for _ in $(seq 1 "${DB_WAIT_TRIES:-60}"); do
+  if docker exec "$cid" python -c "
+import asyncio, asyncpg
+from app.config import settings as s
+async def main():
+    c = await asyncpg.connect(host=s.db_host, port=s.db_port, user=s.postgres_user,
+                              password=s.postgres_password, database=s.postgres_db, timeout=5)
+    await c.fetchval('SELECT 1'); await c.close()
+asyncio.run(main())" >/dev/null 2>&1; then
+    db_ok=1; echo "postgres reachable"; break
   fi
   sleep 3
 done
+if [[ -z "$db_ok" ]]; then
+  echo "ERROR: postgres not reachable from the api container" >&2
+  docker service ps "${STACK}_postgres" --no-trunc | head -5 || true
+  exit 1
+fi
 
 # --- database bootstrap / migrate --------------------------------------------
 # Fresh DB: init.sql already built the schema at HEAD -> stamp head.
@@ -93,7 +107,12 @@ done
 echo "==> running database bootstrap/migrate"
 docker exec "$cid" sh -c '
   cd /project
-  cur=$(alembic current 2>/dev/null | tr -d "[:space:]")
+  # A failing `alembic current` must abort, never be mistaken for a fresh DB
+  # (stamping an existing DB would silently skip its pending migrations).
+  if ! out=$(alembic current 2>&1); then
+    echo "ERROR: alembic current failed:" >&2; echo "$out" | tail -5 >&2; exit 1
+  fi
+  cur=$(printf "%s" "$out" | grep -E "^[0-9a-f]+" | tr -d "[:space:]")
   if [ -z "$cur" ]; then
     echo "fresh DB -> alembic stamp head"; alembic stamp head
   else
