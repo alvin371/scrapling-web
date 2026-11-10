@@ -13,8 +13,9 @@ WORKDIR /project
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev gcc && rm -rf /var/lib/apt/lists/*
 
-COPY app/requirements.txt ./app/requirements.txt
-RUN pip install --no-cache-dir -r app/requirements.txt
+# constraints.txt pins the versions running in production (pip freeze, 2026-11-10).
+COPY app/requirements.txt app/constraints.txt ./app/
+RUN pip install --no-cache-dir -r app/requirements.txt -c app/constraints.txt
 
 # Application package + migration tooling (env.py inserts the repo root on sys.path
 # and imports `app.core.database` / `app.config`, so both must live under /project).

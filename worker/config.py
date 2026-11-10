@@ -33,5 +33,22 @@ class Settings(BaseSettings):
     instagram_session_id: str = ""  # paste sessionid cookie value from a logged-in browser
     threads_session_id: str = ""  # paste sessionid cookie value from a logged-in Threads browser session
 
+    # --- Feature flags (env: upper-case name) ---------------------------------
+    # Open a headless Chromium per Threads post to read the exact view count.
+    # Off by default: measured 2026-11-10, 0 of 27,325 posts got a count this way,
+    # while the plain HTTP response already carries the (approximate) view count.
+    threads_browser_views: bool = False
+    # Remember targets that keep failing permanently (deleted/invalid post, no data)
+    # so the API can fail repeat submissions instantly instead of re-scraping them.
+    skip_dead_targets: bool = True
+    # "unavailable" = Threads redirected to ?error=invalid_post (deleted/private post).
+    dead_unavailable_threshold: int = 2
+    dead_unavailable_ttl_seconds: int = 7 * 86400
+    # "parse" = page loaded without post data. Could also be a Threads layout change
+    # hitting every post, so it needs more strikes and is skipped for a shorter time.
+    dead_parse_threshold: int = 3
+    dead_parse_ttl_seconds: int = 86400
+    dead_strike_window_seconds: int = 3 * 86400  # strikes older than this are forgotten
+
 
 settings = Settings()

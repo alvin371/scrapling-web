@@ -114,3 +114,31 @@ ssh forbes@217.217.253.76 'bash /home/forbes/serve/scrapling-web/repo/deploy/dep
   `CORS_ORIGINS=https://scrap.acnenosystem.com`.
 - The old `/home/forbes/serve/scrapling-web` plain-compose copy is **superseded** by
   this stack and can be archived once the stack is verified.
+
+## Feature flags & operations (added 2026-11-10)
+
+Set in the server `.env` (rendered from GitHub secrets / CI `ci.env`). Defaults are safe; nothing has to be set.
+
+| Env var | Default | Service | Effect |
+|---|---|---|---|
+| `THREADS_BROWSER_VIEWS` | `false` | worker | Launch headless Chromium per Threads post for an exact view count. Measured 2026-11-10: 0 of 27,325 posts got a count this way; the HTTP response already carries the view count. |
+| `SKIP_DEAD_TARGETS` | `true` | worker + api | Worker marks posts that keep failing permanently; API then fails new submissions for them instantly (status `failed`, error starts with `Skipped:`). |
+| `DEAD_UNAVAILABLE_THRESHOLD` / `_TTL_SECONDS` | `2` / `604800` | worker | Threads `?error=invalid_post` (deleted/private): strikes before skipping, and for how long. |
+| `DEAD_PARSE_THRESHOLD` / `_TTL_SECONDS` | `3` / `86400` | worker | Page without post data (could be a Threads layout change, so stricter and shorter). |
+| `DEDUP_INFLIGHT_JOBS` | `true` | api | Re-submitting a target that is still queued/running returns the existing job instead of a duplicate. |
+| `RQ_RESULT_TTL` / `RQ_FAILURE_TTL` | `3600` / `259200` | api | How long finished / failed RQ jobs stay in Redis (RQ default for failed was 1 year). |
+
+Worker runs **2 replicas**; RQ gives each job to exactly one worker, and the worker never writes to Postgres.
+Worker logs go to stdout only (`docker service logs scrapling-web_worker`), capped by the json-file driver.
+
+Operations (inside the api container):
+
+```bash
+docker exec -it $(docker ps -q -f name=scrapling-web_api) python -m app.admin prune-failed           # dry run
+docker exec -it $(docker ps -q -f name=scrapling-web_api) python -m app.admin prune-failed --apply   # delete failed jobs older than RQ_FAILURE_TTL
+docker exec -it $(docker ps -q -f name=scrapling-web_api) python -m app.admin dead-list
+docker exec -it $(docker ps -q -f name=scrapling-web_api) python -m app.admin dead-clear --all       # e.g. after a Threads layout fix
+```
+
+Tests: `tests/worker` (worker image), `tests/api` (api image + throwaway Postgres/Redis),
+`tests/integration` (isolated compose stack with 2 workers; `LIVE=1` hits real Threads; `chaos.sh` for SIGTERM/SIGKILL).

@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.job import ScrapeJob, JobStatus
@@ -16,6 +17,23 @@ class JobRepo:
             job_type=data.job_type,
             target=data.target,
             queue_name=data.queue,
+        )
+        self.db.add(job)
+        await self.db.commit()
+        await self.db.refresh(job)
+        return job
+
+    async def create_failed(self, data: JobCreate, error: str) -> ScrapeJob:
+        """A job row that is failed from the start (never enqueued)."""
+        now = datetime.now(timezone.utc)
+        job = ScrapeJob(
+            platform=data.platform,
+            job_type=data.job_type,
+            target=data.target,
+            queue_name=data.queue,
+            status=JobStatus.failed,
+            error=error,
+            finished_at=now,
         )
         self.db.add(job)
         await self.db.commit()
