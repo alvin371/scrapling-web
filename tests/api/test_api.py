@@ -95,7 +95,7 @@ def set_status(conn, rq_job_id, status):
 def test_33_enqueue_sets_timeout_result_and_failure_ttl(conn):
     r = enqueue(post(), conn)
     job = Job.fetch(r.rq_job_id, connection=conn)
-    assert (job.timeout, job.result_ttl, job.failure_ttl) == (300, 3600, 3 * 86400)
+    assert (job.timeout, job.result_ttl, job.failure_ttl) == (300, 6 * 3600, 3 * 86400)
 
 
 # ------------------------------------------------------------- dedup basics ---
@@ -172,7 +172,7 @@ def test_45_inflight_key_holds_job_id_with_ttl(conn):
     r = enqueue(post(), conn)
     k = dedup.inflight_key("threads", "post", "alice/C1", "default")
     assert conn.get(k).decode() == str(r.id)
-    assert 3600 - 5 <= conn.ttl(k) <= 3600
+    assert 6 * 3600 - 5 <= conn.ttl(k) <= 6 * 3600
 
 
 def test_46_dedup_flag_off_restores_old_behaviour(conn, monkeypatch):
@@ -335,6 +335,53 @@ def test_59_http_poll_copies_rq_result_into_db(conn, monkeypatch):
     g = run(_http(poll)).json()
     assert g["status"] == "completed" and g["result"]["likes"] == 3
     assert rows("WHERE status='completed'") == 1
+
+
+def _scrape(link="https://www.threads.com/@alice/post/C1"):
+    async def f(c):
+        return await c.post("/api/v1/posts/scrape", json={"link": link}, headers=H)
+    return run(_http(f)).json()["job_id"]
+
+
+def _get(jid):
+    async def f(c):
+        return await c.get(f"/api/v1/jobs/{jid}", headers=H)
+    return run(_http(f))
+
+
+def test_59b_poll_of_job_whose_rq_record_vanished_fails_it_as_lost(conn):
+    jid = _scrape()
+    conn.delete(f"rq:job:{run(_jobrow(jid))}")  # result TTL ran out before anyone polled
+    g = _get(jid).json()
+    assert g["status"] == "failed" and g["error"].startswith("Job lost:")
+    assert rows("WHERE status='failed'") == 1
+    assert _get(jid).json()["status"] == "failed"  # stays failed (and cached)
+
+
+def test_59c_lost_job_is_not_reused_by_the_next_submission(conn):
+    jid = _scrape()
+    conn.delete(f"rq:job:{run(_jobrow(jid))}")
+    _get(jid)
+    again = _scrape()
+    assert again != jid and _get(again).json()["status"] == "pending"
+    assert Job.fetch(run(_jobrow(again)), connection=conn).get_status() == "queued"
+
+
+def test_59d_redis_error_while_polling_keeps_job_pending(conn, monkeypatch):
+    jid = _scrape()
+    def boom(*a, **k):
+        raise ConnectionError("redis down")
+    monkeypatch.setattr(JobService, "_fetch_rq_job_or_raise", staticmethod(boom))
+    g = _get(jid)
+    assert g.status_code == 200 and g.json()["status"] == "pending"
+    assert rows("WHERE status='pending'") == 1
+
+
+def test_59e_queued_and_started_jobs_are_not_lost(conn):
+    a = _scrape("https://www.threads.com/@alice/post/C1")
+    b = _scrape("https://www.threads.com/@alice/post/C2")
+    set_status(conn, run(_jobrow(b)), "started")
+    assert _get(a).json()["status"] == "pending" and _get(b).json()["status"] == "running"
 
 
 async def _jobrow(jid):

@@ -15,6 +15,11 @@ from app.services import dedup
 from loguru import logger
 
 
+# error of a job whose RQ record vanished before its result was read; clients match the prefix
+# "Job lost:" and submit again (a new submission is not deduplicated onto a failed job).
+LOST_ERROR = "Job lost: its queue record expired or disappeared before the result was read; submit it again"
+
+
 class _RedisUnavailable(Exception):
     pass
 
@@ -173,18 +178,35 @@ class JobService:
     def _fetch_rq_job(self, rq_job_id: str, conn=None):
         """Fetch the RQ job object from Redis (sync). Returns None if not found/expired."""
         try:
-            from rq.job import Job as RQJob
-            if conn is None:
-                from redis import Redis as SyncRedis
-                conn = SyncRedis.from_url(settings.redis_url)
-            return RQJob.fetch(rq_job_id, connection=conn)
+            return self._fetch_rq_job_or_raise(rq_job_id, conn)
         except Exception:
             return None
 
+    @staticmethod
+    def _fetch_rq_job_or_raise(rq_job_id: str, conn=None):
+        """Like _fetch_rq_job, but a missing job raises rq NoSuchJobError and Redis trouble raises
+        its own error, so the caller can tell "gone for good" from "cannot look right now"."""
+        from rq.job import Job as RQJob
+        if conn is None:
+            from redis import Redis as SyncRedis
+            conn = SyncRedis.from_url(settings.redis_url)
+        return RQJob.fetch(rq_job_id, connection=conn)
+
     async def _sync_from_rq(self, job: ScrapeJob) -> ScrapeJob:
-        """Check RQ for job completion and persist the result to DB."""
-        rq_job = self._fetch_rq_job(job.rq_job_id)
-        if not rq_job:
+        """Check RQ for job completion and persist the result to DB.
+
+        A pending/running row whose RQ job no longer exists will never change by itself (its
+        result expired before anyone polled, or Redis lost it): it is failed with LOST_ERROR so
+        clients resubmit at once instead of waiting on "pending" forever. Redis being unreachable
+        is not that, and leaves the row as it is."""
+        from rq.exceptions import NoSuchJobError
+        try:
+            rq_job = self._fetch_rq_job_or_raise(job.rq_job_id)
+        except NoSuchJobError:
+            logger.warning(f"[poll] job {job.id} lost: RQ job {job.rq_job_id} is gone")
+            return await self.repo.update_status(job, JobStatus.failed, error=LOST_ERROR)
+        except Exception as exc:  # noqa: BLE001 — Redis trouble: answer from the DB as it is
+            logger.warning(f"[poll] cannot read RQ job {job.rq_job_id}: {exc}")
             return job
 
         rq_status = rq_job.get_status()
