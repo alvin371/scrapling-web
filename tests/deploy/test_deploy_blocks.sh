@@ -13,8 +13,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"; REPO="$(cd "$HERE/../.." && pwd)"
 IMG="${IMG:-scrapling-web-api:current}"
 NET=deploytest
 BLOCKS="$(mktemp)"
-awk '/^# --- wait for Postgres to accept connections/,/^# --- health check/' "$REPO/deploy/deploy.sh" \
-  | grep -v '^# --- health check' > "$BLOCKS"
+awk '/^# --- wait for Postgres to accept connections/,/^# --- workers/' "$REPO/deploy/deploy.sh" \
+  | grep -v '^# --- workers' > "$BLOCKS"
 pass=0; fail=0
 ok(){ echo "PASS $1"; pass=$((pass+1)); }
 bad(){ echo "FAIL $1 :: $2"; fail=$((fail+1)); }

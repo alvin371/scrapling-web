@@ -12,7 +12,8 @@
 set -euo pipefail
 
 TAG="${1:-current}"
-STACK="scrapling-web"
+STACK="${STACK:-scrapling-web}"
+API_PORT="${API_PORT:-18000}"
 
 # REPO_DIR = repo root (this file lives in <repo>/deploy/deploy.sh)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -58,13 +59,51 @@ export IMAGE_TAG="$TAG" DATA_DIR ENV_FILE
 echo "==> docker stack deploy $STACK"
 docker stack deploy --resolve-image never -c "$REPO_DIR/docker-stack.yml" "$STACK"
 
+# --- helpers -------------------------------------------------------------------
+# State of the last rolling update of a service ("" when it never had one).
+update_state() { docker service inspect -f '{{if .UpdateStatus}}{{.UpdateStatus.State}}{{end}}' "$1" 2>/dev/null || true; }
+
+# Wait until a service's rolling update has finished; fail on rollback/pause.
+wait_service_update() { # service timeout_seconds
+  local svc=$1 end=$((SECONDS + $2)) st
+  while (( SECONDS < end )); do
+    st=$(update_state "$svc")
+    case "$st" in
+      ""|completed) return 0 ;;
+      updating) ;;
+      *) echo "ERROR: $svc update state '$st'" >&2
+         docker service inspect -f '{{.UpdateStatus.Message}}' "$svc" >&2 || true
+         docker service ps "$svc" --no-trunc | head -6 >&2 || true
+         return 1 ;;
+    esac
+    sleep 3
+  done
+  echo "ERROR: $svc update did not finish within $2s" >&2
+  return 1
+}
+
+# Container of the api task Swarm wants running now, if it is running and healthy.
+# Resolved through the Swarm task, NOT by image: when api code is unchanged two tags
+# share one image ID, and `docker ps -f ancestor=` then also matches the OLD container
+# Swarm is about to stop (2026-11-10: migrate exec killed with exit 137).
+api_container() {
+  local tid c
+  for tid in $(docker service ps -q --filter desired-state=running "${STACK}_api" 2>/dev/null); do
+    [[ "$(docker inspect -f '{{.Status.State}}' "$tid" 2>/dev/null)" == running ]] || continue
+    c=$(docker inspect -f '{{.Status.ContainerStatus.ContainerID}}' "$tid" 2>/dev/null) || continue
+    [[ -n "$c" && "$(docker inspect -f '{{.State.Health.Status}}' "$c" 2>/dev/null)" == healthy ]] || continue
+    echo "$c"; return 0
+  done
+  return 1
+}
+
 # --- wait for the API to come up ---------------------------------------------
+echo "==> waiting for the api update to finish"
+wait_service_update "${STACK}_api" 300 || exit 1
 echo "==> waiting for api to report healthy"
 cid=""
 for _ in $(seq 1 50); do
-  # Only the NEW task's container: during a rolling update the old one can still be
-  # "healthy" while it is being detached from the stack network.
-  cid="$(docker ps -q -f "name=${STACK}_api" -f health=healthy -f "ancestor=scrapling-web-api:$TAG" | head -n1 || true)"
+  cid="$(api_container || true)"
   [[ -n "$cid" ]] && break
   sleep 6
 done
@@ -73,6 +112,7 @@ if [[ -z "$cid" ]]; then
   docker service ps "${STACK}_api" --no-trunc || true
   exit 1
 fi
+echo "api container: $(docker inspect -f '{{.Name}} {{.Config.Image}}' "$cid")"
 
 # --- wait for Postgres to accept connections ---------------------------------
 # The api health endpoint returns ok even when the DB is unreachable, so we must
@@ -120,7 +160,14 @@ docker exec "$cid" sh -c '
   fi
 '
 
+# --- workers -----------------------------------------------------------------
+# The worker update is rolling (one replica at a time, each finishing its running
+# job first: stop_grace_period 330s), so it can outlast the api. Report success
+# only once it has converged; a rollback fails the deploy.
+echo "==> waiting for the worker update to finish"
+wait_service_update "${STACK}_worker" 900 || exit 1
+
 # --- health check -------------------------------------------------------------
 echo "==> health check"
-curl -fsS http://127.0.0.1:18000/api/v1/health && echo
+curl -fsS "http://127.0.0.1:${API_PORT}/api/v1/health" && echo
 echo "==> deploy complete: $STACK ($TAG)"
