@@ -126,6 +126,7 @@ Set in the server `.env` (rendered from GitHub secrets / CI `ci.env`). Defaults 
 | `DEAD_UNAVAILABLE_THRESHOLD` / `_TTL_SECONDS` | `2` / `604800` | worker | Threads `?error=invalid_post` (deleted/private): strikes before skipping, and for how long. |
 | `DEAD_PARSE_THRESHOLD` / `_TTL_SECONDS` | `3` / `86400` | worker | Page without post data (could be a Threads layout change, so stricter and shorter). |
 | `DEDUP_INFLIGHT_JOBS` | `true` | api | Re-submitting a target that is still queued/running returns the existing job instead of a duplicate. |
+| `INFLIGHT_TTL_SECONDS` | `21600` | api | How long a submission is remembered as in flight (RQ status is still checked on every reuse). Keep >= the clients' give-up time. |
 | `RQ_RESULT_TTL` / `RQ_FAILURE_TTL` | `21600` / `259200` | api | How long finished / failed RQ jobs stay in Redis (RQ default for failed was 1 year). |
 | — | — | api | A poll (`GET /jobs/{id}`) of a pending/running job whose RQ record is gone fails it with `error` starting `Job lost:`; clients submit again (the next submission makes a new job). |
 

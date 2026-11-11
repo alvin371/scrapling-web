@@ -64,7 +64,10 @@ class Settings(BaseSettings):
     # Reuse the job already queued/running for the same platform+type+target+queue
     # instead of enqueueing a duplicate (clients resubmit when their poll times out).
     dedup_inflight_jobs: bool = True
-    inflight_ttl_seconds: int = 3600   # upper bound on how long a job is considered in flight
+    # upper bound on how long a job is considered in flight; the RQ status is checked on every reuse,
+    # so a long TTL is safe. Kept >= the clients' give-up time (bka-revamp: 3 h) so a client that
+    # resubmits a slow job gets the same job back instead of a duplicate.
+    inflight_ttl_seconds: int = 6 * 3600
     dedup_claim_ttl_seconds: int = 15     # a claim auto-expires if its request dies mid-enqueue
     dedup_claim_wait_seconds: float = 10.0  # waiters give up on a slow claim and fail open
 

@@ -172,7 +172,7 @@ def test_45_inflight_key_holds_job_id_with_ttl(conn):
     r = enqueue(post(), conn)
     k = dedup.inflight_key("threads", "post", "alice/C1", "default")
     assert conn.get(k).decode() == str(r.id)
-    assert 3600 - 5 <= conn.ttl(k) <= 3600
+    assert 6 * 3600 - 5 <= conn.ttl(k) <= 6 * 3600
 
 
 def test_46_dedup_flag_off_restores_old_behaviour(conn, monkeypatch):
